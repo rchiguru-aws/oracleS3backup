@@ -1,0 +1,101 @@
+## Copyright 2016-2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+## Licensed under the Apache License, Version 2.0 (the "License"). You may not use this file except in compliance with the License. A copy of the License is located at
+## http://aws.amazon.com/apache2.0/
+## or in the "license" file accompanying this file. This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
+## This script is not covered under AWS support.
+
+Parameters:
+  S3BucketName:
+    Description: "Name of the S3 Bucket you want to create to store your backups.  The name must be unique globally and follow S3 naming conventions"
+    Type: String
+    Default: "wtp-non-production-sap-backups"
+
+  TransitionDays:
+    Description: "Number of days before the files are transitioned to the long term storage like GLACIER (the storage class can be selected in the ArchiveStorageClass below)"
+    Type: Number
+    Default: 7
+  
+  ArchiveStorageClass:
+    Description:  "Storage Class for archiving - the default is Glacier https://aws.amazon.com/s3/storage-classes/"
+    Default: "GLACIER"
+    Type: String
+    AllowedValues:
+      - "GLACIER"
+      - "DEEP_ARCHIVE"
+      - "INTELLIGENT_TIERING"
+      - "ONEZONE_IA"
+      - "STANDARD_IA"
+
+  ExpirationDays:
+    Description: "Number of days before the files are expired/deleted from the long term storage"
+    Type: Number
+    Default: 90
+
+
+Resources:
+  S3AccessRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${S3BucketName}-Role"
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: s3.amazonaws.com
+            Action: 'sts:AssumeRole'
+  S3tInstanceProfile:
+    Type: 'AWS::IAM::InstanceProfile'
+    Properties:
+      Path: /
+      Roles:
+        - !Ref S3AccessRole
+
+  S3Policy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub "${S3BucketName}-Policy"
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action: ["s3:ListAllMyBuckets", "s3:GetBucketLocation"]
+            Resource: ["arn:aws:s3:::*"]
+          - Effect: Allow
+            Action: ["s3:*"]
+            Resource: !GetAtt CreatedS3Bucket.Arn
+      Roles:
+        - !Ref S3AccessRole
+
+  CreatedS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties: 
+      AccessControl: Private
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      BucketName: !Ref S3BucketName
+      LifecycleConfiguration:
+        Rules:
+        - Id: ArchiveRule
+          Status: Enabled
+          ExpirationInDays: !Ref ExpirationDays
+          Transitions:
+            - TransitionInDays: !Ref TransitionDays
+              StorageClass: !Ref ArchiveStorageClass
+      VersioningConfiguration: 
+        Status: Suspended
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        IgnorePublicAcls: true
+        BlockPublicPolicy: true
+        RestrictPublicBuckets: true
+
+Outputs:
+  BucketName:
+    Value: !Ref CreatedS3Bucket
+    Description: Name of the S3 bucket
+  RoleName: 
+    Value: !Ref S3AccessRole
+    Description: S3 Role Name

@@ -1,0 +1,201 @@
+## Copyright 2016-2021 Amazon.com, Inc. or its affiliates. All Rights Reserved.
+## Licensed under the Apache License, Version 2.0 (the "License"). You may not use this file except in compliance with the License. A copy of the License is located at
+## http://aws.amazon.com/apache2.0/
+## or in the "license" file accompanying this file. This file is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied. See the License for the specific language governing permissions and limitations under the License.
+## This script is not covered under AWS support.
+
+#!/bin/sh
+
+# Version 1.4 -  16/03/2021 - Fix for MD5 error with large files
+# Version 1.3 -  02/03/2021 - Fixed uncompress functionality when restoring from compressed backup files
+# Version 1.2 -  04/08/2020 - Added functionality to specify the S3 Storage Class - edit the init<SID>.sap file and change the parameter "remote_user" from "s3user" to "s3user-<storage class>" 
+#                             Allowed storage class values: standard, reduced_redundancy,standard_ia,onezone_ia,intelligent_tiering,glacier,deep_archive.  For example: s3-user-onezone_ia
+# Version 1.1 -  03/08/2020 - Ability to compress backups/archives (to activate compression, edit the init<SID>.sap file edit the parameter "remote_host" and change the bucket prefix from "s3://" to "s3compress://" 
+# Version 1.0 -  01/08/2020 - First Release - 01/08/2020
+
+InputParams=$*
+if [ -z "$1" ]
+then
+	echo "This script is only meant to be called by the br executables"
+	echo "Exiting"
+	exit 1
+fi
+
+s3user="s3user"
+user_length=${#s3user}
+
+if [ -z "${BR_MPROG}" ]
+then
+	BR_MPROG="log"
+fi
+
+LogFile=/tmp/sap-ora-backup-agent.${BR_MPROG}
+if [ -f /tmp/sap-ora-backup-agent.debug ]
+then
+	Debug="Y"
+else
+	Debug="N"
+fi
+
+function echo_log ()
+{
+
+#echo $*
+if [ $Debug = "Y" ]
+then
+	echo $* >> ${LogFile}
+fi
+
+}
+
+
+function RestoreFromS3
+{
+
+
+S3Compress=`echo "${InputParams}" | cut -f2 -d"@" | cut -f1 -d":" | tr 'A-Z' 'a-z'`
+case "${S3Compress}" in 
+	"s3compress")
+		uncompress_command="gunzip -c"
+		if [[ ! `basename ${s3_file} | grep -e "\.data*" -e "\.dbf"` ]]
+		then
+			echo_log "Non DB files do not need to be uncompressed `basename ${s3_file}`"
+			uncompress_file="N"
+		else
+			echo_log "File will be uncompressed ${s3_file}"
+			uncompress_file="Y"
+		fi
+	;;
+	*)
+		echo_log "File will NOT be uncompressed ${s3_file}"
+		uncompress_file="N"
+	;;
+esac
+
+
+if [ $uncompress_file = "Y" ]
+then
+	echo_log "aws s3 cp s3:${s3_file}.gz - | ${uncompress_command} > ${param}" 
+	CopyOutput=`aws s3 cp s3:${s3_file}.gz - | ${uncompress_command} > ${param} 2>&1`
+else
+	echo_log "aws s3 cp s3:${s3_file} ${param}" 
+	CopyOutput=`aws s3 cp s3:${s3_file} ${param} 2>&1`
+fi
+
+rc=$?
+echo_log "$CopyOutput"
+
+if [ $rc -ne 0 ]
+then
+	echo_log "Error restoring file ${s3_file} - rc=$rc"
+	echo $CopyOutput
+	exit 1
+else
+	echo_log "File ${param} restored successfully from ${s3_file} - rc=${rc}"
+fi
+
+}
+
+function BackupToS3
+{
+
+S3Compress=`echo "$InputParams" | cut -f2 -d"@" | cut -f1 -d":" | tr 'A-Z' 'a-z'`
+case "${S3Compress}" in 
+	"s3compress")
+		compress_command="gzip -c"
+		if [[ ! `basename ${s3_file} | grep -e "\.data*" -e "\.dbf"` ]]
+		then
+			echo_log "Turning off compression for non DB files `basename ${s3_file}`"
+			compress_file="N"
+		else
+			echo_log "Files will be compressed"
+			compress_file="Y"
+		fi
+	;;
+	*)
+		compress_file="N"
+		echo_log "Files will NOT be compressed"
+	;;
+esac
+
+
+if [ $compress_file = "Y" ]
+then
+	echo_log "cat ${param} | ${compress_command} | aws s3 cp - s3:${s3_file}.gz --storage-class ${S3Storage}"
+	CopyOutput=`cat ${param} | ${compress_command} | aws s3 cp - s3:${s3_file}.gz --storage-class ${S3Storage} 2>&1`
+else
+	echo_log "cat ${param} | aws s3 cp - s3:${s3_file} --storage-class ${S3Storage}"
+	CopyOutput=`cat ${param} | aws s3 cp - s3:${s3_file} --storage-class ${S3Storage} 2>&1`
+fi
+
+rc=$?
+echo_log "$CopyOutput"
+
+if [ $rc -ne 0 ]
+then
+	echo_log "Error backing up ${s3_file} - rc=$rc"
+	echo $CopyOutput
+	exit 1
+else
+	echo_log "File ${param} backed up successfully to ${s3_file} rc=${rc}"
+fi
+
+}
+
+
+echo_log "input=${InputParams}"
+echo_log "Directory=`pwd`"
+#echo "---------------------------------------------" >> ${LogFile}
+#env >> ${LogFile}
+#echo "---------------------------------------------" >> ${LogFile}
+
+
+if [[ "${InputParams}" =~ "mkdir" || "${InputParams}" =~ "rmdir" ]]
+then
+	echo_log "mkdir/rmdir : $InputParams"
+        exit 0
+fi
+
+if [ ${1:0:user_length} = "s3user" ]
+then
+	echo_log "Mode=Restoring"
+	S3Function="restoring"
+else
+	echo_log "Mode=Backing up"
+	S3Function="backing up"
+	S3Storage=`echo "${InputParams}" |  awk '{ print $NF }' | cut -f1 -d"@" | cut -f2 -d"-" | tr 'a-z' 'A-Z'`
+	case "${S3Storage}" in
+		"STANDARD"|"REDUCED_REDUNDANCY"|"STANDARD_IA"|"ONEZONE_IA"|"INTELLIGENT_TIERING"|"GLACIER"|"DEEP_ARCHIVE")
+			echo_log "S3Storage class is set to ${S3Storage}"
+		;;
+		*)
+			S3Storage="STANDARD"
+			echo_log "S3Storage class defaulting to STANDARD"
+		;;
+	esac
+fi
+
+for param in `echo "${InputParams}"`
+do
+	if [[ ${param:0:user_length} != "${s3user}" && "${param:0:1}" != "-" ]]
+	then
+		if [ "${S3Function}" = "restoring" ]
+		then
+			s3_file=`echo $InputParams |  awk '{ print $1 }' | cut -f2- -d":" | tr -d ":"` 
+			echo_log "S3 File: ${s3_file}"
+			RestoreFromS3
+		else
+			s3_file=`echo $InputParams |  awk '{ print $NF }' | cut -f2- -d":" | tr -d ":"` 
+			echo_log "S3 File: ${s3_file}"
+			s3_check=`basename ${s3_file}`
+			if [ "${s3_check}" = "${ORACLE_SID}" ]
+			then
+				source_file=`basename ${param}`
+				s3_file="${s3_file}/${source_file}"
+				echo_log "REMAPPED to ${s3_file}"
+			fi
+			BackupToS3
+		fi
+	fi
+done
+exit 0
